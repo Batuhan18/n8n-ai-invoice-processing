@@ -1,0 +1,586 @@
+{
+  "name": "AI Invoice Processing – Gmail → AI → Approval → Ledger/ERP",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "has:attachment filename:pdf"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "id": "342de844-3892-4698-883d-d1e5315ae463",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "attachment_0",
+        "options": {}
+      },
+      "id": "2bea1ec0-936c-4500-bb31-2bd0b4d201ae",
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        220,
+        400
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'gpt-4o-mini',\n  temperature: 0,\n  response_format: {\n    type: 'json_schema',\n    json_schema: {\n      name: 'invoice',\n      strict: true,\n      schema: {\n        type: 'object',\n        additionalProperties: false,\n        required: ['is_invoice', 'vendor_name', 'vendor_tax_id', 'invoice_number', 'invoice_date', 'due_date',\n                   'currency', 'subtotal', 'tax_total', 'total', 'line_items', 'confidence', 'notes'],\n        properties: {\n          is_invoice: { type: 'boolean' },\n          vendor_name: { type: 'string' },\n          vendor_tax_id: { type: ['string', 'null'] },\n          invoice_number: { type: 'string' },\n          invoice_date: { type: 'string', description: 'YYYY-MM-DD' },\n          due_date: { type: ['string', 'null'], description: 'YYYY-MM-DD' },\n          currency: { type: 'string', description: 'ISO 4217 code, e.g. USD, EUR, TRY' },\n          subtotal: { type: 'number' },\n          tax_total: { type: 'number' },\n          total: { type: 'number' },\n          line_items: {\n            type: 'array',\n            items: {\n              type: 'object',\n              additionalProperties: false,\n              required: ['description', 'quantity', 'unit_price', 'amount'],\n              properties: {\n                description: { type: 'string' },\n                quantity: { type: 'number' },\n                unit_price: { type: 'number' },\n                amount: { type: 'number' }\n              }\n            }\n          },\n          confidence: { type: 'number', description: '0-1, how sure you are the extraction is correct' },\n          notes: { type: 'string' }\n        }\n      }\n    }\n  },\n  messages: [\n    { role: 'system', content: 'You extract structured data from supplier invoices for an accounts-payable system. The text can be in any language (English, Turkish, German, Spanish...). Convert all amounts to plain numbers with a dot as decimal separator (1.234,56 -> 1234.56). Dates as YYYY-MM-DD. subtotal = net amount before tax, tax_total = total VAT/KDV/sales tax, total = amount payable. line_items.amount is the net line total. If the document is not an invoice (quote, receipt for a newsletter, contract, marketing), set is_invoice to false and fill the other fields with empty values. Never invent numbers: if something is unreadable, lower the confidence and explain in notes.' },\n    { role: 'user', content: 'E-mail subject: ' + ($('Gmail Trigger').item.json.subject || '') + '\\n\\nDocument text:\\n' + String($json.text || '').slice(0, 15000) }\n  ]\n}) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "36b53360-6e67-458f-8ddc-5838ca1cc23e",
+      "name": "AI: Extract Invoice Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Turns the OpenAI response into a clean invoice object and attaches e-mail metadata.\nconst email = $('Gmail Trigger').item.json;\nlet inv;\ntry {\n  inv = JSON.parse($json.choices[0].message.content);\n} catch (e) {\n  inv = { is_invoice: false, notes: 'Could not parse AI output: ' + e.message };\n}\nconst from = (email.from && email.from.value && email.from.value[0] && email.from.value[0].address)\n  || (email.from && email.from.text) || '';\nreturn {\n  json: {\n    received_at: new Date().toISOString(),\n    email_from: from,\n    email_subject: email.subject || '',\n    email_id: email.id || '',\n    ...inv,\n  },\n};\n"
+      },
+      "id": "750fba5a-8ef5-4b93-819f-34842544fe56",
+      "name": "Parse AI Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8ad1607c-0b26-4061-bbf6-3ac9c723cdad",
+              "leftValue": "={{ $json.is_invoice }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7bf69a7f-92c7-4eba-a596-7d2982b21472",
+      "name": "Only Invoices",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Invoices"
+        },
+        "options": {}
+      },
+      "id": "6bfcfbdc-ebf9-4825-9d6e-a135328686de",
+      "name": "Read Invoice Ledger",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1100,
+        400
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== CONFIG – adjust to the client's approval policy =====\nconst CONFIG = {\n  autoApproveMaxTotal: 1000,   // invoices above this total always go to a human\n  priceIncreaseAlertPct: 10,   // flag line items whose unit price rose more than this % vs the last approved invoice\n  vendorTotalSpikeFactor: 2,   // flag totals greater than N x the vendor's historical average\n  mathTolerance: 0.05,         // rounding tolerance for the sum checks\n  minConfidence: 0.8,          // AI confidence below this -> human review\n  reviewNewVendors: true,      // first invoice from an unknown vendor -> human review\n};\n\nconst r2 = n => Math.round((Number(n) || 0) * 100) / 100;\nconst norm = s => String(s == null ? '' : s).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, ' ').trim();\nconst vendorKey = (name, taxId) => (taxId && norm(taxId)) ? 'tax:' + norm(taxId) : 'name:' + norm(name);\nconst parseLines = s => { try { const v = JSON.parse(s || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; } };\n\n// ---- ledger (Google Sheet) -> duplicate index + trusted price history\nconst ledger = $('Read Invoice Ledger').all().map(i => i.json).filter(r => r && r.invoice_number);\nconst existing = new Set();\nconst history = {};\nfor (const row of ledger) {\n  const key = vendorKey(row.vendor_name, row.vendor_tax_id);\n  if (String(row.status) !== 'rejected') existing.add(key + '|' + norm(row.invoice_number));\n  if (!['approved', 'auto_approved'].includes(String(row.status))) continue;\n  const h = history[key] || (history[key] = { totals: [], prices: {} });\n  if (Number(row.total) > 0) h.totals.push(Number(row.total));\n  const date = String(row.invoice_date || '');\n  for (const l of parseLines(row.line_items_json)) {\n    const d = norm(l.description);\n    const price = Number(l.unit_price);\n    if (!d || !(price > 0)) continue;\n    if (!h.prices[d] || date >= h.prices[d].date) h.prices[d] = { price, date };\n  }\n}\n\n// ---- check every new invoice\nconst seenInBatch = new Set();\nreturn $input.all().map((item, idx) => {\n  const inv = item.json;\n  const reasons = [];\n  const key = vendorKey(inv.vendor_name, inv.vendor_tax_id);\n  const lines = Array.isArray(inv.line_items) ? inv.line_items : [];\n\n  // 1) arithmetic\n  if (lines.length) {\n    const sum = r2(lines.reduce((a, l) => a + (Number(l.amount) || 0), 0));\n    if (Math.abs(sum - r2(inv.subtotal)) > CONFIG.mathTolerance)\n      reasons.push(`Line items add up to ${sum}, but subtotal is ${r2(inv.subtotal)}`);\n  }\n  const calcTotal = r2(r2(inv.subtotal) + r2(inv.tax_total));\n  if (Math.abs(calcTotal - r2(inv.total)) > CONFIG.mathTolerance)\n    reasons.push(`Subtotal + tax = ${calcTotal}, but total is ${r2(inv.total)}`);\n\n  // 2) completeness / AI confidence\n  if (!inv.invoice_number) reasons.push('Invoice number missing');\n  if ((Number(inv.confidence) || 0) < CONFIG.minConfidence) reasons.push(`Low AI confidence (${inv.confidence})`);\n\n  // 3) duplicates (ledger + same batch)\n  const dupKey = key + '|' + norm(inv.invoice_number);\n  if (inv.invoice_number && (existing.has(dupKey) || seenInBatch.has(dupKey)))\n    reasons.push('POSSIBLE DUPLICATE: this vendor + invoice number is already recorded');\n  seenInBatch.add(dupKey);\n\n  // 4) history: new vendor, total spike, unit-price increases\n  const h = history[key];\n  if (!h) {\n    if (CONFIG.reviewNewVendors) reasons.push('First invoice from this vendor');\n  } else {\n    if (h.totals.length) {\n      const avg = h.totals.reduce((a, b) => a + b, 0) / h.totals.length;\n      if (avg > 0 && r2(inv.total) > avg * CONFIG.vendorTotalSpikeFactor)\n        reasons.push(`Total ${r2(inv.total)} is over ${CONFIG.vendorTotalSpikeFactor}x this vendor's average (${r2(avg)})`);\n    }\n    for (const l of lines) {\n      const prev = h.prices[norm(l.description)];\n      const up = Number(l.unit_price);\n      if (prev && up > 0) {\n        const pct = (up - prev.price) / prev.price * 100;\n        if (pct > CONFIG.priceIncreaseAlertPct)\n          reasons.push(`Price up ${pct.toFixed(1)}%: \"${l.description}\" ${prev.price} -> ${up} (last invoice ${prev.date})`);\n      }\n    }\n  }\n\n  // 5) amount policy\n  if (r2(inv.total) > CONFIG.autoApproveMaxTotal)\n    reasons.push(`Total ${r2(inv.total)} ${inv.currency || ''} is above the auto-approve limit (${CONFIG.autoApproveMaxTotal})`);\n\n  const lineText = lines.slice(0, 10)\n    .map(l => `• ${l.description} — ${l.quantity} x ${l.unit_price} = ${l.amount}`).join('\\n')\n    + (lines.length > 10 ? `\\n… and ${lines.length - 10} more lines` : '');\n\n  const message = [\n    '🧾 Invoice needs approval',\n    '',\n    `Vendor: ${inv.vendor_name}${inv.vendor_tax_id ? ' (' + inv.vendor_tax_id + ')' : ''}`,\n    `Invoice: ${inv.invoice_number || '—'}  |  Date: ${inv.invoice_date || '—'}  |  Due: ${inv.due_date || '—'}`,\n    `Total: ${r2(inv.total)} ${inv.currency || ''}  (net ${r2(inv.subtotal)} + tax ${r2(inv.tax_total)})`,\n    `From: ${inv.email_from}`,\n    '',\n    'Why it needs review:',\n    ...reasons.map(r => '⚠️ ' + r),\n    '',\n    lineText,\n  ].join('\\n').slice(0, 3900);\n\n  return {\n    json: {\n      ...inv,\n      line_items_json: JSON.stringify(lines),\n      review_reasons: reasons.join(' | '),\n      needs_review: reasons.length > 0,\n      telegram_message: message,\n    },\n    pairedItem: { item: idx },\n  };\n});\n"
+      },
+      "id": "3499cafe-80a7-4ce7-9a8a-a788dd7e3d15",
+      "name": "Validate & Check History",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3413ed87-5b93-448a-8e46-3a207dcad7b4",
+              "leftValue": "={{ $json.needs_review }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6c4f627d-8884-4a69-b3be-974c0f998205",
+      "name": "Needs Review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "message": "={{ $json.telegram_message }}",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "✅ Approve",
+            "disapproveLabel": "❌ Reject"
+          }
+        },
+        "options": {}
+      },
+      "id": "39a7818f-2c81-48e8-a03e-272f73f8577b",
+      "name": "Telegram: Ask Approval",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        280
+      ],
+      "webhookId": "29579b99-83ad-4f5a-aa8e-1cf099f6129e"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Merges the approver's Telegram decision back into the invoice.\nconst inv = $('Validate & Check History').item.json;\nconst approved = !!($json.data && $json.data.approved === true);\nreturn {\n  json: {\n    ...inv,\n    status: approved ? 'approved' : 'rejected',\n    decided_by: 'telegram',\n    decided_at: new Date().toISOString(),\n  },\n};\n"
+      },
+      "id": "d3b0cbe1-60af-4434-aed3-7a46501bc0d1",
+      "name": "Apply Approval Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Clean invoice under the limit -> approved by rules, no human needed.\nreturn {\n  json: {\n    ...$json,\n    status: 'auto_approved',\n    decided_by: 'rules',\n    decided_at: new Date().toISOString(),\n  },\n};\n"
+      },
+      "id": "8078c2fe-3c61-41ee-aee0-a1a966a78400",
+      "name": "Mark Auto-Approved",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Keeps only the ledger columns (must match the header row of the \"Invoices\" sheet).\nconst COLUMNS = ['received_at', 'email_from', 'email_subject', 'vendor_name', 'vendor_tax_id',\n  'invoice_number', 'invoice_date', 'due_date', 'currency', 'subtotal', 'tax_total', 'total',\n  'line_items_json', 'confidence', 'review_reasons', 'status', 'decided_by', 'decided_at'];\nconst row = {};\nfor (const c of COLUMNS) row[c] = $json[c] == null ? '' : $json[c];\nreturn { json: row };\n"
+      },
+      "id": "c73da407-8389-4da8-815c-c7e75fb00e5f",
+      "name": "Shape Ledger Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Invoices"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "c7c5304a-4f80-47ee-a90a-50f49af6dff2",
+      "name": "Append to Invoice Ledger",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2440,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "71ee7268-a473-43cb-885a-352ee1b1d9de",
+              "leftValue": "={{ $json.status }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "approved"
+            },
+            {
+              "id": "0a0c69b9-4893-4ebd-9891-07e983826dd5",
+              "leftValue": "={{ $json.status }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "auto_approved"
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "5a8293c5-c620-413c-9d3f-70da28b7eb6f",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2660,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-ERP.example.com/api/purchase-invoices",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ...$json, line_items: JSON.parse($json.line_items_json || '[]') }) }}",
+        "options": {}
+      },
+      "id": "9ca1bd05-90f0-43b4-a98a-bbe070ec8af6",
+      "name": "Post to ERP (configure)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2880,
+        300
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "content": "## 🧾 AI Invoice Processing (Accounts Payable Automation)\nSupplier invoices arrive by e-mail → AI reads the PDF → math, duplicate and price checks against your history → clean invoices are auto-approved, risky ones go to Telegram for one-tap approval → everything is logged to a Google Sheet ledger → approved invoices can be pushed to your ERP (SAP, Odoo, QuickBooks, Logo, …).\n\n**Catches:** duplicate invoices · arithmetic errors · unit-price increases vs the last invoice · unusual totals · new vendors · low-confidence reads.",
+        "height": 240,
+        "width": 760,
+        "color": 4
+      },
+      "id": "06afff9e-e455-4fd2-94dc-b22310c85ab6",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### ⚙️ Setup (10 min)\n1. **Gmail Trigger** – connect the inbox that receives invoices (adjust the search filter if needed).\n2. **AI: Extract Invoice Data** – add your OpenAI credential (model: gpt-4o-mini, change if you like).\n3. **Google Sheet** – create a sheet with a tab named `Invoices` and the header row from the README; paste its ID into both Sheets nodes.\n4. **Telegram** – add your bot credential and your chat ID.\n5. **Validate & Check History** – set your approval policy in `CONFIG` (auto-approve limit, price-increase %, …).\n6. *(Optional)* enable **Post to ERP** and point it to your ERP's API.",
+        "height": 280,
+        "width": 720,
+        "color": 6
+      },
+      "id": "95b0b8c8-eae0-4797-a805-02898ecaea99",
+      "name": "Note 2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        780,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 👤 Human in the loop\nOnly invoices with at least one warning reach the approver. The Telegram message lists every reason (e.g. *\"Price up 18%: Steel sheet 2mm 4.20 → 4.96\"*), so the decision takes seconds.",
+        "height": 180,
+        "width": 520,
+        "color": 5
+      },
+      "id": "11babb86-3361-4e79-9367-2c2809beb384",
+      "name": "Note 3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1700,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 🔌 ERP hand-off (disabled by default)\nReplace the URL/auth with your ERP endpoint (SAP S/4HANA OData, Odoo, QuickBooks, Xero, Logo, Netsis…). Only approved / auto-approved invoices reach this node.",
+        "height": 200,
+        "width": 400,
+        "color": 3
+      },
+      "id": "8cea3b01-c8f5-4d4c-b5f9-adafd2e5aa3a",
+      "name": "Note 4",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2780,
+        570
+      ]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "AI: Extract Invoice Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Extract Invoice Data": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Output": {
+      "main": [
+        [
+          {
+            "node": "Only Invoices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Invoices": {
+      "main": [
+        [
+          {
+            "node": "Read Invoice Ledger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Invoice Ledger": {
+      "main": [
+        [
+          {
+            "node": "Validate & Check History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Check History": {
+      "main": [
+        [
+          {
+            "node": "Needs Review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Review?": {
+      "main": [
+        [
+          {
+            "node": "Telegram: Ask Approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Auto-Approved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram: Ask Approval": {
+      "main": [
+        [
+          {
+            "node": "Apply Approval Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Approval Decision": {
+      "main": [
+        [
+          {
+            "node": "Shape Ledger Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Auto-Approved": {
+      "main": [
+        [
+          {
+            "node": "Shape Ledger Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape Ledger Row": {
+      "main": [
+        [
+          {
+            "node": "Append to Invoice Ledger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append to Invoice Ledger": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Post to ERP (configure)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
