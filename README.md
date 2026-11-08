@@ -4,6 +4,8 @@ Supplier invoices arrive by e-mail. AI reads the PDF, checks it against your his
 
 ![Workflow in n8n](docs/workflow.png)
 
+🎬 **Demo video (48 s):** [docs/demo.mp4](docs/demo.mp4)
+
 ```
 Gmail (PDF) → Extract text → OpenAI (structured JSON) → Only invoices
    → Read ledger → Validate & check history ─┬─ warnings → Telegram Approve / Reject ─┐
